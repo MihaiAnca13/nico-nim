@@ -373,6 +373,8 @@ var screenHeight* = 128
 
 var screenFormat* = sfIndexed
 
+var headlessVideo* = false
+
 var screenPaddingX* = 0
 var screenPaddingY* = 0
 

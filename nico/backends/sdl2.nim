@@ -246,7 +246,7 @@ proc resize*(w,h: int) =
     if render != nil:
       sdl.destroyRenderer(render)
 
-  if window == nil:
+  if window == nil and not headlessVideo:
     debug "window is null, cannot resize"
     return
 
@@ -313,6 +313,13 @@ proc resize*(w,h: int) =
     raise newException(Exception, "error creating RGB surface")
 
   stencilBuffer = newSurface(screenWidth, screenHeight)
+
+  if headlessVideo:
+    createRecordBuffer(true)
+    for rf in resizeFuncs:
+      rf(screenWidth,screenHeight)
+    debug "resize done (headless)"
+    return
 
   when defined(opengl):
     glViewport(dstRect.x, dstRect.y, dstRect.w, dstRect.h)
@@ -404,6 +411,11 @@ proc resize*(w,h: int) =
 
   else:
     render = sdl.createRenderer(window, -1, sdl.Renderer_Accelerated or sdl.Renderer_PresentVsync)
+    if render == nil:
+      render = sdl.createRenderer(window, -1, sdl.Renderer_Software)
+    if render == nil:
+      debug "renderer error: ", sdl.getError()
+      raise newException(Exception, "Could not create renderer")
     var rendererInfo: sdl.RendererInfo
     discard render.getRendererInfo(rendererInfo.addr)
     vsyncEnabled = (rendererInfo.flags and sdl.Renderer_PresentVsync) != 0
@@ -436,6 +448,9 @@ proc setShaderFloat*(uniformName: string, value: float32) =
     discard
 
 proc resize*() =
+  if headlessVideo and window == nil:
+    resize(targetScreenWidth, targetScreenHeight)
+    return
   if window == nil:
     return
 
@@ -507,6 +522,13 @@ when defined(opengl):
     assert(glIsProgram(result) == true)
 
 proc createWindow*(title: string, w,h: int, scale: int = 2, fullscreen: bool = false) =
+  if headlessVideo:
+    targetScreenWidth = w
+    targetScreenHeight = h
+    let displayW = w * scale
+    let displayH = h * scale
+    resize(displayW, displayH)
+    return
   when defined(opengl):
     when defined(emscripten):
       var r: sdl.Rect
@@ -843,6 +865,8 @@ proc saveJsonFile*(filename: string, data: JsonNode) =
   discard fp.close(fp)
 
 proc present*() =
+  if headlessVideo or render == nil:
+    return
 
   when defined(opengl):
     convertToRGBA(swCanvas, swCanvas32.pixels, swCanvas32.pitch, screenWidth, screenHeight)
@@ -988,6 +1012,8 @@ proc setKeyMap*(mapstr: string) =
       keymap[btn].add(scancode)
 
 proc setFullscreen*(fullscreen: bool) =
+  if headlessVideo or window == nil:
+    return
   if fullscreen:
     debug "setting fullscreen"
     discard window.setWindowFullscreen(WINDOW_FULLSCREEN_DESKTOP)
@@ -996,6 +1022,8 @@ proc setFullscreen*(fullscreen: bool) =
     discard window.setWindowFullscreen(0)
 
 proc getFullscreen*(): bool =
+  if headlessVideo or window == nil:
+    return false
   return (window.getWindowFlags() and WINDOW_FULLSCREEN_DESKTOP) != 0
 
 proc appHandleEvent(evt: sdl.Event) =
@@ -1008,9 +1036,10 @@ proc appHandleEvent(evt: sdl.Event) =
 
   elif evt.kind == APP_DIDENTERFOREGROUND:
     debug "resumed"
-    var w,h: cint
-    window.getWindowSize(w.addr,h.addr)
-    resize(w,h)
+    if window != nil:
+      var w,h: cint
+      window.getWindowSize(w.addr,h.addr)
+      resize(w,h)
     current_time = sdl.getTicks()
     focused = true
 
@@ -1281,6 +1310,12 @@ proc appHandleEvent(evt: sdl.Event) =
 proc checkInput() =
   var evt: sdl.Event
 
+  if headlessVideo:
+    while pollEvent(evt.addr) == 1:
+      if evt.kind == Quit:
+        keepRunning = false
+    return
+
   while pollEvent(evt.addr) == 1:
     var handled = false
     if evt.kind in [MouseButtonDown, MouseButtonUp, MouseMotion, KeyDown, KeyUp, MouseWheel, TextInput, ControllerButtonUp, ControllerButtonDown, ControllerAxisMotion]:
@@ -1358,6 +1393,8 @@ proc checkInput() =
       appHandleEvent(evt)
 
 proc setScreenSize*(w,h: int) =
+  if headlessVideo or window == nil:
+    return
   window.setWindowSize(w,h)
   resize()
 
@@ -1406,7 +1443,7 @@ proc step*() {.cdecl.} =
 
     frame += 1
     if acc > timeStep and acc < timeStep+timeStep:
-      if window != nil:
+      if window != nil or headlessVideo:
         profileBegin("draw")
         drawFunc()
         profileEnd()
@@ -1451,6 +1488,8 @@ proc getPerformanceFrequency*(): uint64 {.inline.} =
   return sdl.getPerformanceFrequency()
 
 proc setWindowTitle*(title: string) =
+  if headlessVideo or window == nil:
+    return
   window.setWindowTitle(title)
 
 proc getUnmappedJoysticks*(): seq[Joystick] =
@@ -1849,7 +1888,12 @@ proc init*(org: string, app: string) =
       debug sdl.getError()
       quit(1)
   else:
-    if sdl.init(INIT_EVERYTHING) != 0:
+    let initFlags =
+      if headlessVideo:
+        INIT_AUDIO or INIT_EVENTS or INIT_TIMER or INIT_JOYSTICK or INIT_GAMECONTROLLER
+      else:
+        INIT_EVERYTHING
+    if sdl.init(initFlags.uint32) != 0:
       debug sdl.getError()
       quit(1)
 
@@ -1891,7 +1935,10 @@ proc init*(org: string, app: string) =
 
   initConfig()
 
-  initMixer()
+  if not headlessVideo:
+    initMixer()
+  else:
+    noAudio = true
 
 proc setFullSpeedGif*(enabled: bool) =
   when defined(gif):

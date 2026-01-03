@@ -3204,6 +3204,10 @@ proc setScreenFormat*(format: ScreenFormat) =
   ## sets the screen format, call before createWindow for best results
   screenFormat = format
 
+proc setHeadlessVideo*(enabled: bool) =
+  ## disables window/renderer creation while still allowing draw calls
+  headlessVideo = enabled
+
 proc getScreenFormat*(): ScreenFormat =
   ## returns the current screen format
   return screenFormat
