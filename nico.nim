@@ -18,6 +18,7 @@ export StencilBlend
 
 export EventListener
 export Palette
+export ScreenFormat
 
 export SynthData
 export SynthDataStep
@@ -943,11 +944,36 @@ proc palt*() =
     paletteTransparent[i] = if i == 0: true else: false
 
 {.push checks:off, optimization: speed.}
+proc canvasSetColor(x,y: Pint, c: ColorId) {.inline.} =
+  if screenFormat == sfRGBA:
+    let mapped = paletteMapDraw[c]
+    let col = currentPalette.data[mapped]
+    let alpha = if paletteTransparent[mapped]: 0'u8 else: 255'u8
+    swCanvas.set(x.int, y.int, (col.r, col.g, col.b, alpha))
+  else:
+    swCanvas.set(x.int, y.int, paletteMapDraw[c].uint8)
+
+proc canvasGetRGBA(x,y: Pint): (uint8,uint8,uint8,uint8) {.inline.} =
+  let idx = (y.int * swCanvas.w + x.int) * 4
+  (swCanvas.data[idx], swCanvas.data[idx + 1], swCanvas.data[idx + 2], swCanvas.data[idx + 3])
+
 proc cls*(c: ColorId = 0) =
   ## clears the screen to the given color. Default is 0. If you need clipping, use rectfill() instead.
-  let colId = paletteMapDraw[c].uint8
-  for i in 0..<swCanvas.data.len:
-    swCanvas.data[i] = colId
+  if screenFormat == sfRGBA:
+    let mapped = paletteMapDraw[c]
+    let col = currentPalette.data[mapped]
+    let alpha = if paletteTransparent[mapped]: 0'u8 else: 255'u8
+    var i = 0
+    while i < swCanvas.data.len:
+      swCanvas.data[i] = col.r
+      swCanvas.data[i + 1] = col.g
+      swCanvas.data[i + 2] = col.b
+      swCanvas.data[i + 3] = alpha
+      i += 4
+  else:
+    let colId = paletteMapDraw[c].uint8
+    for i in 0..<swCanvas.data.len:
+      swCanvas.data[i] = colId
 
 proc setCamera*(x,y: Pint = 0) =
   ## sets the current camera position, future drawing operations will draw based on camera position
@@ -974,9 +1000,9 @@ proc psetRaw*(x,y: Pint, c: ColorId) =
   if c >= 0 and stencilTest(x,y,stencilRef):
     if not stencilOnly:
       if ditherPass(x,y):
-        swCanvas.set(x,y,paletteMapDraw[c].uint8)
+        canvasSetColor(x,y,c)
       elif ditherColor >= 0:
-        swCanvas.set(x,y,paletteMapDraw[ditherColor.ColorId].uint8)
+        canvasSetColor(x,y,ditherColor.ColorId)
     if stencilWrite:
       case stencilBlend:
       of stencilReplace:
@@ -1057,16 +1083,25 @@ proc pget*(x,y: Pint): ColorId =
   let y = y - cameraY
   if x > swCanvas.w-1 or x < 0 or y > swCanvas.h-1 or y < 0:
     return 0
+  if screenFormat == sfRGBA:
+    let (r,g,b,a) = canvasGetRGBA(x,y)
+    return mapRGBA(r,g,b,a)
   return swCanvas.data[y*swCanvas.w+x].ColorId
 
 proc pgetRaw*(x,y: Pint): ColorId =
   ## returns the palette index for a pixel on the canvas, does not account for camera
+  if screenFormat == sfRGBA:
+    let (r,g,b,a) = canvasGetRGBA(x,y)
+    return mapRGBA(r,g,b,a)
   return swCanvas.data[y*swCanvas.w+x].ColorId
 
 proc pgetRGB*(x,y: Pint): (uint8,uint8,uint8) =
   ## returns the RGB values for a pixel on the canvas, does not account for camera
   if x > swCanvas.w-1 or x < 0 or y > swCanvas.h-1 or y < 0:
     return (0'u8,0'u8,0'u8)
+  if screenFormat == sfRGBA:
+    let (r,g,b,_) = canvasGetRGBA(x,y)
+    return (r,g,b)
   return palCol(swCanvas.data[y*swCanvas.w+x].ColorId)
 
 proc rectfill*(x1,y1,x2,y2: Pint) =
@@ -1701,6 +1736,43 @@ proc fontBlit(font: Font, srcRect, dstRect: Rect, color: ColorId) =
     sy += 1.0f * (sh/dh)
     dy += 1.0f
 
+proc blitRGBA(src: Surface, dx, dy: Pint, scale: Pint = 1) =
+  if src == nil:
+    return
+  if screenFormat != sfRGBA:
+    return
+  let dw = src.w * scale
+  let dh = src.h * scale
+  for y in 0 ..< dh:
+    let sy = (y div scale)
+    let dyPos = dy.int + y
+    if dyPos < clipMinY or dyPos > clipMaxY:
+      continue
+    for x in 0 ..< dw:
+      let sx = (x div scale)
+      let dxPos = dx.int + x
+      if dxPos < clipMinX or dxPos > clipMaxX:
+        continue
+      let idx = (sy * src.w + sx) * 4
+      let sr = src.data[idx]
+      let sg = src.data[idx + 1]
+      let sb = src.data[idx + 2]
+      let sa = src.data[idx + 3]
+      if sa == 0'u8:
+        continue
+      if sa == 255'u8:
+        swCanvas.set(dxPos, dyPos, (sr, sg, sb, sa))
+        continue
+      let (dr, dg, db, da) = canvasGetRGBA(dxPos, dyPos)
+      let invSa = 255 - sa.int
+      let outA = sa.int + (da.int * invSa) div 255
+      if outA == 0:
+        continue
+      let outR = (sr.int * sa.int + dr.int * da.int * invSa div 255) div outA
+      let outG = (sg.int * sa.int + dg.int * da.int * invSa div 255) div outA
+      let outB = (sb.int * sa.int + db.int * da.int * invSa div 255) div outA
+      swCanvas.set(dxPos, dyPos, (outR.uint8, outG.uint8, outB.uint8, outA.uint8))
+
 proc overlap(a,b: Rect): bool =
   return not ( a.x > b.x + b.w or a.y > b.y + b.h or a.x + a.w < b.x or a.y + a.h < b.y )
 
@@ -2175,6 +2247,7 @@ proc consumeCharacter(font: Font, posX, posY: var int, index: int, charId: Rune)
 
 proc createFontFromSurface(surface: Surface, chars: string): Font =
   var font = new(Font)
+  font.kind = fkBitmap
 
   font.w = surface.w
   font.h = surface.h
@@ -2275,10 +2348,39 @@ proc loadFont*(index: int, filename: string, chars: string) =
   if shouldReplace:
     setFont(index)
 
+proc loadTtfFont*(index: int, filename: string, size: int) =
+  ## loads a TTF font into font index. requires RGBA screen format.
+  let shouldReplace = currentFont == fonts[index]
+  let handle = backend.loadTtfFont(filename, size)
+  if handle == nil:
+    raise newException(Exception, "Unable to load TTF font: " & filename)
+  var font = new(Font)
+  font.kind = fkTtf
+  font.ttfHandle = handle
+  font.ttfSize = size
+  font.ttfLineSkip = backend.ttfLineSkip(handle)
+  fonts[index] = font
+  if shouldReplace:
+    setFont(index)
+
 proc glyph*(c: Rune, x,y: Pint, scale: Pint = 1): Pint =
   ## draw a glyph from the current font
   if currentFont == nil:
     raise newException(Exception, "No font selected")
+  if currentFont.kind == fkTtf:
+    let ch = $c
+    let (w, _) = backend.ttfTextSize(currentFont.ttfHandle, ch)
+    if w == 0:
+      return 0
+    if screenFormat != sfRGBA:
+      raise newException(Exception, "TTF fonts require RGBA screen format")
+    let mapped = paletteMapDraw[currentColor]
+    let col = currentPalette.data[mapped]
+    let alpha = if paletteTransparent[mapped]: 0'u8 else: 255'u8
+    let surf = backend.renderTtfText(currentFont.ttfHandle, ch, (col.r, col.g, col.b, alpha))
+    if surf != nil:
+      blitRGBA(surf, x - cameraX, y - cameraY, scale)
+    return w * scale
   if not currentFont.rects.hasKey(c):
     return
   let src: Rect = currentFont.rects[c]
@@ -2298,12 +2400,27 @@ proc fontHeight*(): Pint =
   ## returns the height of the current font in pixels
   if currentFont == nil:
     return 0
+  if currentFont.kind == fkTtf:
+    return currentFont.ttfLineSkip
   return currentFont.rects[Rune(' ')].h
 
 proc print*(text: string, x,y: Pint, scale: Pint = 1) =
   ## prints a string using the current font
   if currentFont == nil:
     raise newException(Exception, "No font selected")
+  if currentFont.kind == fkTtf:
+    if screenFormat != sfRGBA:
+      raise newException(Exception, "TTF fonts require RGBA screen format")
+    let mapped = paletteMapDraw[currentColor]
+    let col = currentPalette.data[mapped]
+    let alpha = if paletteTransparent[mapped]: 0'u8 else: 255'u8
+    var drawY = y
+    for line in text.splitLines:
+      let surf = backend.renderTtfText(currentFont.ttfHandle, line, (col.r, col.g, col.b, alpha))
+      if surf != nil:
+        blitRGBA(surf, x - cameraX, drawY - cameraY, scale)
+      drawY += fontHeight() * scale + scale
+    return
   var x = x
   var y = y
   let ix = x
@@ -2318,6 +2435,10 @@ proc print*(text: string, scale: Pint = 1) =
   ## prints a string using the current font at cursor position
   if currentFont == nil:
     raise newException(Exception, "No font selected")
+  if currentFont.kind == fkTtf:
+    print(text, cursorX, cursorY, scale)
+    cursorY += fontHeight() * scale + scale
+    return
   var x = cursorX
   let y = cursorY
   let lineHeight = fontHeight() * scale + scale
@@ -2329,6 +2450,9 @@ proc glyphWidth*(c: Rune, scale: Pint = 1): Pint =
   ## returns the width of the glyph in the current font
   if currentFont == nil:
     raise newException(Exception, "No font selected")
+  if currentFont.kind == fkTtf:
+    let (w, _) = backend.ttfTextSize(currentFont.ttfHandle, $c)
+    return w * scale
   if not currentFont.rects.hasKey(c):
     return 0
   result = currentFont.rects[c].w*scale + scale
@@ -2341,6 +2465,13 @@ proc textWidth*(text: string, scale: Pint = 1): Pint =
   ## returns the width of a string in the current font
   if currentFont == nil:
     raise newException(Exception, "No font selected")
+  if currentFont.kind == fkTtf:
+    var maxW = 0
+    for line in text.splitLines:
+      let (w, _) = backend.ttfTextSize(currentFont.ttfHandle, line)
+      if w > maxW:
+        maxW = w
+    return maxW * scale
   for c in text.runes:
     if not currentFont.rects.hasKey(c):
       raise newException(Exception, "character not in font: '" & $c & "'")
@@ -2362,7 +2493,8 @@ proc copy*(sx,sy,dx,dy,w,h: Pint) =
 
 proc copyPixelsToMem*(sx,sy: Pint, buffer: var openarray[uint8], count = -1) =
   ## copy pixels from the canvas to memory
-  let offset = sy*swCanvas.w+sx
+  let bpp = bytesPerPixel(screenFormat)
+  let offset = (sy*swCanvas.w+sx) * bpp
   let count = if count == -1: buffer.len else: count
   for i in 0..<min(buffer.len,count):
     if offset+i < 0:
@@ -2373,7 +2505,8 @@ proc copyPixelsToMem*(sx,sy: Pint, buffer: var openarray[uint8], count = -1) =
 
 proc copyMemToScreen*(dx,dy: Pint, buffer: var openarray[uint8], count = -1) =
   ## copy pixels from memory to the canvas
-  let offset = dy*swCanvas.w+dx
+  let bpp = bytesPerPixel(screenFormat)
+  let offset = (dy*swCanvas.w+dx) * bpp
   let count = if count == -1: buffer.len else: count
   for i in 0..<min(buffer.len,count):
     if offset+i < 0:
@@ -3066,6 +3199,14 @@ proc getFullscreen*(): bool =
 
 proc setScreenSize*(w,h: int) =
   backend.setScreenSize(w,h)
+
+proc setScreenFormat*(format: ScreenFormat) =
+  ## sets the screen format, call before createWindow for best results
+  screenFormat = format
+
+proc getScreenFormat*(): ScreenFormat =
+  ## returns the current screen format
+  return screenFormat
 
 proc setWindowTitle*(title: string) =
   backend.setWindowTitle(title)

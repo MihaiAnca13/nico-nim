@@ -42,6 +42,10 @@ type Palette* = tuple
   size: int
   data: array[maxPaletteSize, tuple[r,g,b: uint8]]
 
+type ScreenFormat* = enum
+  sfIndexed
+  sfRGBA
+
 proc hash*(a: Keycode): Hash =
   var h: Hash = 0
   h = h !& a.cint
@@ -60,14 +64,21 @@ type
   Pint* = int32
   Pfloat* = float32
   ColorId* = int
+  FontKind* = enum
+    fkBitmap
+    fkTtf
 
   Rect* = tuple
     x,y,w,h: int
 
   Font* = ref object
+    kind*: FontKind
     rects*: Table[Rune,Rect]
     data*: seq[uint8]
     w*,h*: int
+    ttfHandle*: pointer
+    ttfSize*: int
+    ttfLineSkip*: int
 
   FontId* = range[0..15]
   MusicId* = range[-1..63]
@@ -360,6 +371,8 @@ var integerScreenScale* = false
 var screenWidth* = 128
 var screenHeight* = 128
 
+var screenFormat* = sfIndexed
+
 var screenPaddingX* = 0
 var screenPaddingY* = 0
 
@@ -496,27 +509,46 @@ proc newSurfaceRGBA*(w,h: int): Surface =
   result.w = w
   result.h = h
 
+proc bytesPerPixel*(format: ScreenFormat): int =
+  if format == sfRGBA: 4 else: 1
+
 {.push checks:off.}
 proc convertToABGR*(src: Surface, rgbaPixels: pointer, dpitch, w,h: cint) =
   assert(src.w == w and src.h == h)
   var rgbaPixels = cast[ptr array[int.high, uint8]](rgbaPixels)
-  for y in 0..h-1:
-    for x in 0..w-1:
-      let c = currentPalette.data[paletteMapDisplay[src.data[y*src.w+x]]]
-      rgbaPixels[y*dpitch+(x*4)] = 255
-      rgbaPixels[y*dpitch+(x*4)+1] = c.b
-      rgbaPixels[y*dpitch+(x*4)+2] = c.g
-      rgbaPixels[y*dpitch+(x*4)+3] = c.r
+  if src.channels == 4:
+    for y in 0..h-1:
+      for x in 0..w-1:
+        let idx = (y*src.w + x) * 4
+        let r = src.data[idx]
+        let g = src.data[idx + 1]
+        let b = src.data[idx + 2]
+        let a = src.data[idx + 3]
+        rgbaPixels[y*dpitch+(x*4)] = a
+        rgbaPixels[y*dpitch+(x*4)+1] = b
+        rgbaPixels[y*dpitch+(x*4)+2] = g
+        rgbaPixels[y*dpitch+(x*4)+3] = r
+  else:
+    for y in 0..h-1:
+      for x in 0..w-1:
+        let c = currentPalette.data[paletteMapDisplay[src.data[y*src.w+x]]]
+        rgbaPixels[y*dpitch+(x*4)] = 255
+        rgbaPixels[y*dpitch+(x*4)+1] = c.b
+        rgbaPixels[y*dpitch+(x*4)+2] = c.g
+        rgbaPixels[y*dpitch+(x*4)+3] = c.r
 
 proc convertToRGBA*(src: Surface, abgrPixels: pointer, dpitch, w,h: cint) =
   var abgrPixels = cast[ptr array[int.high, uint8]](abgrPixels)
-  for y in 0..h-1:
-    for x in 0..w-1:
-      let c = currentPalette.data[paletteMapDisplay[src.data[y*src.w+x]]]
-      abgrPixels[y*dpitch+(x*4)] = c.r
-      abgrPixels[y*dpitch+(x*4)+1] = c.g
-      abgrPixels[y*dpitch+(x*4)+2] = c.b
-      abgrPixels[y*dpitch+(x*4)+3] = 255
+  if src.channels == 4:
+    copyMem(abgrPixels, src.data[0].addr, src.w * src.h * 4)
+  else:
+    for y in 0..h-1:
+      for x in 0..w-1:
+        let c = currentPalette.data[paletteMapDisplay[src.data[y*src.w+x]]]
+        abgrPixels[y*dpitch+(x*4)] = c.r
+        abgrPixels[y*dpitch+(x*4)+1] = c.g
+        abgrPixels[y*dpitch+(x*4)+2] = c.b
+        abgrPixels[y*dpitch+(x*4)+3] = 255
 
 proc convertToRGBA*(src: Surface): Surface =
   # converts indexed to RGBA

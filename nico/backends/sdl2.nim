@@ -23,6 +23,7 @@ when defined(gif):
   import gifenc
 
 import sdl2_nim/sdl
+import sdl2_nim/sdl_ttf as ttf
 
 import nico/ringbuffer
 import nico/stb_vorbis
@@ -182,6 +183,7 @@ var acc = 0.0
 var next_time: uint32
 
 var config: Config
+var ttfReady: bool
 
 when defined(gif):
   var recordFrame: common.Surface
@@ -202,13 +204,26 @@ proc resetChannel*(channel: var Channel)
 
 proc loadConfig*()
 
+proc ensureTtf(): bool =
+  if ttfReady:
+    return true
+  let res = ttf.init()
+  if res == 0:
+    ttfReady = true
+    return true
+  debug "TTF_Init failed: ", sdl.getError()
+  return false
+
 proc createRecordBuffer(forceClear: bool = false) =
   if window == nil:
     # this can happen later
     return
 
   when defined(gif):
-    recordFrame = newSurface(screenWidth,screenHeight)
+    if screenFormat == sfRGBA:
+      recordFrame = newSurfaceRGBA(screenWidth,screenHeight)
+    else:
+      recordFrame = newSurface(screenWidth,screenHeight)
 
     if recordSeconds <= 0:
       recordFrames = initRingBuffer[common.Surface](1)
@@ -284,7 +299,10 @@ proc resize*(w,h: int) =
   clipMaxX = screenWidth - 1
   clipMaxY = screenHeight - 1
 
-  swCanvas = newSurface(screenWidth,screenHeight)
+  if screenFormat == sfRGBA:
+    swCanvas = newSurfaceRGBA(screenWidth,screenHeight)
+  else:
+    swCanvas = newSurface(screenWidth,screenHeight)
 
   if swCanvas32 != nil:
     sdl.freeSurface(swCanvas32)
@@ -669,7 +687,7 @@ proc readFile*(filename: string): string =
       break
 
   if rwClose(fp) != 0:
-    debug getError()
+    debug sdl.getError()
 
   result = cast[string](buffer)
 
@@ -739,6 +757,71 @@ proc loadSurfaceFromPNGNoConvert*(filename: string, callback: proc(surface: comm
     surface.data = cast[seq[uint8]](png.pixels)
     callback(surface)
 
+proc loadTtfFont*(filename: string, size: int): pointer =
+  if not ensureTtf():
+    return nil
+  let path = if fileExists(filename): filename else: joinPath(assetPath, filename)
+  let font = ttf.openFont(path.cstring, size.cint)
+  if font == nil:
+    debug "TTF_OpenFont failed: ", sdl.getError()
+  return cast[pointer](font)
+
+proc closeTtfFont*(handle: pointer) =
+  if handle == nil:
+    return
+  ttf.closeFont(cast[ttf.Font](handle))
+
+proc ttfLineSkip*(handle: pointer): int =
+  if handle == nil:
+    return 0
+  ttf.fontLineSkip(cast[ttf.Font](handle)).int
+
+proc ttfTextSize*(handle: pointer, text: string): (int, int) =
+  if handle == nil:
+    return (0, 0)
+  var w, h: cint
+  if ttf.sizeUTF8(cast[ttf.Font](handle), text.cstring, w.addr, h.addr) == 0:
+    return (w.int, h.int)
+  (0, 0)
+
+proc renderTtfText*(handle: pointer, text: string, color: tuple[r,g,b,a: uint8]): common.Surface =
+  if handle == nil or text.len == 0:
+    return nil
+  if not ensureTtf():
+    return nil
+  let fg = sdl.Color(r: color.r, g: color.g, b: color.b, a: color.a)
+  var surface = ttf.renderUTF8_Blended(cast[ttf.Font](handle), text.cstring, fg)
+  if surface == nil:
+    debug "TTF_RenderUTF8_Blended failed: ", sdl.getError()
+    return nil
+  var useSurface = surface
+  if useSurface.format.BytesPerPixel != 4:
+    let converted = sdl.convertSurfaceFormat(useSurface, PIXELFORMAT_RGBA32, 0)
+    if converted != nil:
+      sdl.freeSurface(useSurface)
+      useSurface = converted
+  if useSurface == nil:
+    sdl.freeSurface(surface)
+    return nil
+  if mustLock(useSurface):
+    discard sdl.lockSurface(useSurface)
+  let resultSurf = newSurfaceRGBA(useSurface.w.int, useSurface.h.int)
+  let pitch = useSurface.pitch.int
+  let pixels = cast[ptr UncheckedArray[uint8]](useSurface.pixels)
+  for y in 0 ..< useSurface.h.int:
+    let row = y * pitch
+    for x in 0 ..< useSurface.w.int:
+      let idx = row + x * 4
+      let pixel = cast[ptr uint32](addr pixels[idx])[]
+      let c = sdl.getRGBA(pixel, useSurface.format)
+      resultSurf.set(x, y, (c.r, c.g, c.b, c.a))
+  if mustLock(useSurface):
+    sdl.unlockSurface(useSurface)
+  sdl.freeSurface(useSurface)
+  if surface != useSurface:
+    sdl.freeSurface(surface)
+  resultSurf
+
 
 proc refreshSpritesheets*() =
   for i in 0..<spriteSheets.len:
@@ -798,9 +881,13 @@ proc flip*() =
   when defined(gif):
     if recordSeconds > 0:
       if fullSpeedGif or frame mod 2 == 0:
-        copyMem(recordFrame.data[0].addr, swCanvas.data[0].addr, swCanvas.w * swCanvas.h)
+        let bpp = bytesPerPixel(screenFormat)
+        copyMem(recordFrame.data[0].addr, swCanvas.data[0].addr, swCanvas.w * swCanvas.h * bpp)
         recordFrames.add([recordFrame])
-        recordFrame = newSurface(swCanvas.w, swCanvas.h)
+        if screenFormat == sfRGBA:
+          recordFrame = newSurfaceRGBA(swCanvas.w, swCanvas.h)
+        else:
+          recordFrame = newSurface(swCanvas.w, swCanvas.h)
 
 proc saveScreenshot*() =
   createDir(writePath & "/screenshots")
@@ -1485,7 +1572,7 @@ proc getConfigValue*(section, key: string, default: string = ""): string =
 proc queueAudio*(samples: var seq[float32]) =
   let ret = queueAudio(audioDeviceId, samples[0].addr, (samples.len * sizeof(float32)).uint32)
   if ret != 0:
-    raise newException(Exception, "error queueing audio: " & $getError())
+    raise newException(Exception, "error queueing audio: " & $sdl.getError())
 
 proc processSynth(self: var Channel): float32 =
   if audioSampleId mod 2 == 0:
@@ -1706,7 +1793,7 @@ proc initMixer*(wantsAudioIn = false) =
   audioDeviceId = openAudioDevice(nil, 0, audioSpec.addr, obtained.addr, 0)
   if audioDeviceId == 0:
     noAudio = true
-    debug "Unable to open audio device: " & $getError()
+    debug "Unable to open audio device: " & $sdl.getError()
     return
   else:
     debug "opened audio output ", obtained.freq.int, " channels: ", obtained.channels.int, " format: ", obtained.format.toHex()
@@ -1734,7 +1821,7 @@ proc initMixer*(wantsAudioIn = false) =
     if nAudioInDevices > 0:
       audioInDeviceId = openAudioDevice(nil, 1, audioInSpec.addr, obtained.addr, 0)
       if audioInDeviceId == 0:
-        raise newException(Exception, "Unable to open audio input device: " & $getError())
+        raise newException(Exception, "Unable to open audio input device: " & $sdl.getError())
       else:
         debug "opened audio input  ", obtained.freq.int, " channels: ", obtained.channels.int, " format: ", obtained.format.toHex()
       inputSamples = newSeq[float32](audioBufferSize)
