@@ -1111,8 +1111,29 @@ proc rectfill*(x1,y1,x2,y2: Pint) =
   let miny = min(y1,y2) - cameraY
   let maxy = max(y1,y2) - cameraY
 
-  for y in max(miny,clipMinY)..min(maxy,clipMaxY):
-    for x in max(minx,clipMinX)..min(maxx,clipMaxX):
+  let xStart = max(minx, clipMinX)
+  let xEnd = min(maxx, clipMaxX)
+  let yStart = max(miny, clipMinY)
+  let yEnd = min(maxy, clipMaxY)
+  if xEnd < xStart or yEnd < yStart:
+    return
+  if screenFormat == sfRGBA:
+    let mapped = paletteMapDraw[currentColor]
+    let col = currentPalette.data[mapped]
+    let alpha = if paletteTransparent[mapped]: 0'u8 else: 255'u8
+    let packed = uint32(col.r) or (uint32(col.g) shl 8) or (uint32(col.b) shl 16) or
+      (uint32(alpha) shl 24)
+    for y in yStart..yEnd:
+      var idx = (y * swCanvas.w + xStart) * 4
+      var i = 0
+      let count = xEnd - xStart + 1
+      while i < count:
+        cast[ptr uint32](addr swCanvas.data[idx])[] = packed
+        idx += 4
+        i.inc()
+    return
+  for y in yStart..yEnd:
+    for x in xStart..xEnd:
       psetRaw(x,y,currentColor)
 
 proc rrectfill*(x1,y1,x2,y2: Pint, r: Pint = 1) =
@@ -2363,13 +2384,67 @@ proc loadTtfFont*(index: int, filename: string, size: int) =
   if shouldReplace:
     setFont(index)
 
+const ttfCacheMax = 256
+
+var ttfTextCache = initTable[string, Surface]()
+var ttfTextCacheOrder: seq[string] = @[]
+var ttfSizeCache = initTable[string, int]()
+var ttfSizeCacheOrder: seq[string] = @[]
+
+proc ttfCacheKey(handle: pointer, text: string, color: tuple[r,g,b,a: uint8]): string =
+  result = $cast[uint](handle)
+  result.add("|")
+  result.add($color.r)
+  result.add(",")
+  result.add($color.g)
+  result.add(",")
+  result.add($color.b)
+  result.add(",")
+  result.add($color.a)
+  result.add("|")
+  result.add(text)
+
+proc ttfSizeKey(handle: pointer, text: string): string =
+  result = $cast[uint](handle)
+  result.add("|")
+  result.add(text)
+
+proc ttfCacheInsert[T](cache: var Table[string, T], order: var seq[string],
+    key: string, value: T, maxEntries: int) =
+  if cache.hasKey(key):
+    cache[key] = value
+    return
+  if cache.len >= maxEntries and order.len > 0:
+    let old = order[0]
+    order.delete(0)
+    cache.del(old)
+  cache[key] = value
+  order.add(key)
+
+proc getTtfSurface(handle: pointer, text: string, color: tuple[r,g,b,a: uint8]): Surface =
+  let key = ttfCacheKey(handle, text, color)
+  if ttfTextCache.hasKey(key):
+    return ttfTextCache[key]
+  let surf = backend.renderTtfText(handle, text, color)
+  if surf != nil:
+    ttfCacheInsert(ttfTextCache, ttfTextCacheOrder, key, surf, ttfCacheMax)
+  surf
+
+proc measureTtf(handle: pointer, text: string): int =
+  let key = ttfSizeKey(handle, text)
+  if ttfSizeCache.hasKey(key):
+    return ttfSizeCache[key]
+  let (w, _) = backend.ttfTextSize(handle, text)
+  ttfCacheInsert(ttfSizeCache, ttfSizeCacheOrder, key, w, ttfCacheMax)
+  w
+
 proc glyph*(c: Rune, x,y: Pint, scale: Pint = 1): Pint =
   ## draw a glyph from the current font
   if currentFont == nil:
     raise newException(Exception, "No font selected")
   if currentFont.kind == fkTtf:
     let ch = $c
-    let (w, _) = backend.ttfTextSize(currentFont.ttfHandle, ch)
+    let w = measureTtf(currentFont.ttfHandle, ch)
     if w == 0:
       return 0
     if screenFormat != sfRGBA:
@@ -2377,7 +2452,7 @@ proc glyph*(c: Rune, x,y: Pint, scale: Pint = 1): Pint =
     let mapped = paletteMapDraw[currentColor]
     let col = currentPalette.data[mapped]
     let alpha = if paletteTransparent[mapped]: 0'u8 else: 255'u8
-    let surf = backend.renderTtfText(currentFont.ttfHandle, ch, (col.r, col.g, col.b, alpha))
+    let surf = getTtfSurface(currentFont.ttfHandle, ch, (col.r, col.g, col.b, alpha))
     if surf != nil:
       blitRGBA(surf, x - cameraX, y - cameraY, scale)
     return w * scale
@@ -2416,7 +2491,7 @@ proc print*(text: string, x,y: Pint, scale: Pint = 1) =
     let alpha = if paletteTransparent[mapped]: 0'u8 else: 255'u8
     var drawY = y
     for line in text.splitLines:
-      let surf = backend.renderTtfText(currentFont.ttfHandle, line, (col.r, col.g, col.b, alpha))
+      let surf = getTtfSurface(currentFont.ttfHandle, line, (col.r, col.g, col.b, alpha))
       if surf != nil:
         blitRGBA(surf, x - cameraX, drawY - cameraY, scale)
       drawY += fontHeight() * scale + scale
@@ -2451,7 +2526,7 @@ proc glyphWidth*(c: Rune, scale: Pint = 1): Pint =
   if currentFont == nil:
     raise newException(Exception, "No font selected")
   if currentFont.kind == fkTtf:
-    let (w, _) = backend.ttfTextSize(currentFont.ttfHandle, $c)
+    let w = measureTtf(currentFont.ttfHandle, $c)
     return w * scale
   if not currentFont.rects.hasKey(c):
     return 0
@@ -2468,7 +2543,7 @@ proc textWidth*(text: string, scale: Pint = 1): Pint =
   if currentFont.kind == fkTtf:
     var maxW = 0
     for line in text.splitLines:
-      let (w, _) = backend.ttfTextSize(currentFont.ttfHandle, line)
+      let w = measureTtf(currentFont.ttfHandle, line)
       if w > maxW:
         maxW = w
     return maxW * scale
