@@ -2887,6 +2887,42 @@ proc sspr*(sx,sy, sw,sh, dx,dy: Pint, dw,dh: Pint = -1, hflip, vflip: bool = fal
   var dst: Rect = ((dx-cameraX).int,(dy-cameraY).int,dw.int,dh.int)
   blitStretch(spritesheet, src, dst, hflip, vflip)
 
+proc ssprRot*(sx,sy, sw,sh, dx,dy: Pint, dw,dh: Pint, radians: float32) =
+  ## draw a stretched sprite rotated around its center
+  var scratch {.global.}: Surface
+  var scratchW {.global.}: int
+  var scratchH {.global.}: int
+  let dw = if dw > 0: dw else: sw
+  let dh = if dh > 0: dh else: sh
+  if scratch == nil or scratchW != dw.int or scratchH != dh.int:
+    scratch = newSurface(dw.int, dh.int)
+    scratchW = dw.int
+    scratchH = dh.int
+  var i = 0
+  while i < scratch.data.len:
+    scratch.data[i] = 0
+    inc i
+  let srcX = sx.int
+  let srcY = sy.int
+  let srcW = sw.int
+  let srcH = sh.int
+  if srcW <= 0 or srcH <= 0 or dw.int <= 0 or dh.int <= 0:
+    return
+  let scaleX = srcW.float32 / dw.float32
+  let scaleY = srcH.float32 / dh.float32
+  var ty = 0
+  while ty < dh.int:
+    let syi = min(srcY + int(flr(ty.float32 * scaleY)), spritesheet.h - 1)
+    var tx = 0
+    while tx < dw.int:
+      let sxi = min(srcX + int(flr(tx.float32 * scaleX)), spritesheet.w - 1)
+      let col = spritesheet.data[syi * spritesheet.w + sxi]
+      scratch.data[ty * scratch.w + tx] = col
+      inc tx
+    inc ty
+  let dst: Rect = (0, 0, dw.int, dh.int)
+  blitFastRot(scratch, dst, dx + dw div 2, dy + dh div 2, radians)
+
 proc roundTo*[T](a: T, n: T): T =
   ## returns a rounded to the nearest n
   when T is int:
