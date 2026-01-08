@@ -2727,6 +2727,24 @@ proc loadSpriteSheet*(index: int, filename: string, tileWidth,tileHeight: Pint =
     if shouldReplace:
       setSpritesheet(index)
 
+proc loadSpriteSheetFromBytes*(index: int, data: string, tileWidth,tileHeight: Pint = 8) =
+  ## load a spritesheet into index from PNG bytes in memory
+  if index < 0 or index >= spritesheets.len:
+    raise newException(Exception, "Invalid spritesheet " & $index)
+  let shouldReplace = spritesheet == spritesheets[index]
+  backend.loadSurfaceFromPNGBytes(data) do(surface: Surface) {.nosinks.}:
+    echo "loaded spritesheet: <memory> ", surface.w, "x", surface.h, " tile:", tileWidth, "x", tileHeight
+    if surface.w mod tileWidth != 0 or surface.h mod tileHeight != 0:
+      raise newException(Exception, "Spritesheet size must be divisible by tile size: " & $tileWidth & "x" & $tileHeight)
+    let numTiles = (surface.w div tileWidth) * (surface.h div tileHeight)
+    spritesheets[index] = surface
+    spritesheets[index].tw = tileWidth
+    spritesheets[index].th = tileHeight
+    spritesheets[index].filename = "<memory>"
+    spritesheets[index].spriteFlags = newSeq[uint8](numTiles)
+    if shouldReplace:
+      setSpritesheet(index)
+
 proc spriteSize*(): (int,int) =
   ## returns the current spritesheets's tileWidth and tileHeight
   return (spritesheet.tw, spritesheet.th)
