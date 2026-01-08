@@ -44,7 +44,9 @@ export setClipboardText
 # Audio
 export joinPath
 export loadSfx
+export loadSfxFromBytes
 export loadMusic
+export loadMusicFromBytes
 export sfx
 export music
 export getMusic

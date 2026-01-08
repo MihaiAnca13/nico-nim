@@ -191,6 +191,7 @@ var recordFrames: RingBuffer[common.Surface]
 
 var sfxBufferLibrary: array[64,SfxBuffer]
 var musicFileLibrary: array[64,string]
+var musicDataLibrary: array[64,string]
 
 var audioSampleId: uint32
 var audioChannels: array[nAudioChannels, Channel]
@@ -2067,12 +2068,13 @@ proc waitUntilReady*() =
         debug "ready to continue"
         wait = false
 
-proc newSfxBuffer(filename: string): SfxBuffer =
+proc newSfxBufferFromBytes(data: string): SfxBuffer =
   result = new(SfxBuffer)
-  var data = readFile(filename)
+  if data.len == 0:
+    raise newException(IOError, "empty audio data")
   var v = stb_vorbis_open_memory(data[0].addr, data.len, nil, nil)
   if v == nil:
-    raise newException(IOError, "error opening vorbis file: " & filename)
+    raise newException(IOError, "error opening vorbis data")
 
   let info = stb_vorbis_get_info(v)
 
@@ -2085,9 +2087,13 @@ proc newSfxBuffer(filename: string): SfxBuffer =
 
   let count = stb_vorbis_get_samples_float_interleaved(v, info.channels, result.data[0].addr, nSamples * info.channels.int)
   if count < nSamples:
-    debug "only loaded ", count, " samples from ", filename, " expected: ", nSamples
+    debug "only loaded ", count, " samples from memory expected: ", nSamples
 
   stb_vorbis_close(v)
+
+proc newSfxBuffer(filename: string): SfxBuffer =
+  let data = readFile(filename)
+  result = newSfxBufferFromBytes(data)
 
 proc resetChannel*(channel: var Channel) =
   channel.kind = channelNone
@@ -2101,10 +2107,24 @@ proc loadSfx*(index: SfxId, filename: string) =
     return
   sfxBufferLibrary[index] = newSfxBuffer(joinPath(assetPath, filename))
 
+proc loadSfxFromBytes*(index: SfxId, data: string) =
+  if index < 0 or index > 63:
+    return
+  sfxBufferLibrary[index] = newSfxBufferFromBytes(data)
+
 proc loadMusic*(index: int, filename: string) =
   if index < 0 or index > 63:
     return
   musicFileLibrary[index] = joinPath(assetPath, filename)
+  musicDataLibrary[index] = ""
+
+proc loadMusicFromBytes*(index: int, data: string) =
+  if index < 0 or index > 63:
+    return
+  if data.len == 0:
+    raise newException(IOError, "empty music data")
+  musicDataLibrary[index] = data
+  musicFileLibrary[index] = ""
 
 proc getMusic*(channel: AudioChannelId): int =
   if audioChannels[channel].kind != channelMusic:
@@ -2163,21 +2183,28 @@ proc music*(channel: AudioChannelId, index: int, loop: int = -1) =
   if index < 0 or index >= 64:
     raise newException(Exception, "invalid music index: " & $index)
 
-  if musicFileLibrary[index] == "":
+  if musicFileLibrary[index] == "" and musicDataLibrary[index].len == 0:
     raise newException(Exception, "no music loaded into index: " & $index)
 
   if audioChannels[channel].musicFile != nil:
     stb_vorbis_close(audioChannels[channel].musicFile)
     audioChannels[channel].musicFile = nil
 
-  var fp = open(musicFileLibrary[index], fmRead)
-  if fp == nil:
-    raise newException(IOError, "unable to open music file for reading: " & musicFileLibrary[index])
+  var v: Vorbis
+  if musicDataLibrary[index].len > 0:
+    let data = musicDataLibrary[index]
+    v = stb_vorbis_open_memory(data[0].addr, data.len, nil, nil)
+    if v == nil:
+      raise newException(IOError, "unable to open vorbis memory for index: " & $index)
+  else:
+    var fp = open(musicFileLibrary[index], fmRead)
+    if fp == nil:
+      raise newException(IOError, "unable to open music file for reading: " & musicFileLibrary[index])
 
-  var v = stb_vorbis_open_file(fp, 1, nil, nil)
-  if v == nil:
-    fp.close()
-    raise newException(IOError, "unable to open vorbis file: " & musicFileLibrary[index])
+    v = stb_vorbis_open_file(fp, 1, nil, nil)
+    if v == nil:
+      fp.close()
+      raise newException(IOError, "unable to open vorbis file: " & musicFileLibrary[index])
 
   let info = stb_vorbis_get_info(v)
 
